@@ -1,0 +1,12 @@
+{
+  "name": "aviagram-shopify-integration",
+  "version": "1.0.0",
+  "description": "Aviagram payment gateway integration for Shopify",
+  "private": true,
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "@shopify/shopify-api": "^11.0.0"
+  }
+}
