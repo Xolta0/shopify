@@ -1,8 +1,47 @@
+import { URLSearchParams } from "node:url";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
 };
+
+// Token cache
+let cachedToken = null;
+let tokenExpiresAt = 0;
+
+async function getShopifyToken() {
+  // Return cached token if still valid (with 60s buffer)
+  if (cachedToken && Date.now() < tokenExpiresAt - 60000) return cachedToken;
+
+  const shop = process.env.SHOPIFY_STORE_DOMAIN;
+  const clientId = process.env.SHOPIFY_CLIENT_ID;
+  const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
+
+  const response = await fetch(
+    `https://${shop}/admin/oauth/access_token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Shopify token request failed: ${response.status} ${errText}`);
+  }
+
+  const { access_token, expires_in } = await response.json();
+  cachedToken = access_token;
+  tokenExpiresAt = Date.now() + expires_in * 1000;
+  console.log("Shopify access token refreshed");
+  return cachedToken;
+}
 
 export default async function handler(req, res) {
   if (req.method === "OPTIONS") {
@@ -17,10 +56,10 @@ export default async function handler(req, res) {
   }
 
   const shop = process.env.SHOPIFY_STORE_DOMAIN;
-  const token = process.env.SHOPIFY_ADMIN_API_TOKEN;
-  const apiUrl = `https://${shop}/admin/api/2024-10`;
+  const apiUrl = `https://${shop}/admin/api/2025-01`;
 
   try {
+    const token = await getShopifyToken();
     const { items, customer, shippingAddress, discountCode } = req.body;
 
     // Validate required fields
