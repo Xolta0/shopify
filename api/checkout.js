@@ -1,0 +1,193 @@
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+export default async function handler(req, res) {
+  if (req.method === "OPTIONS") {
+    Object.entries(corsHeaders).forEach(([key, val]) => res.setHeader(key, val));
+    return res.status(200).end();
+  }
+
+  Object.entries(corsHeaders).forEach(([key, val]) => res.setHeader(key, val));
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  const shop = process.env.SHOPIFY_STORE_DOMAIN;
+  const token = process.env.SHOPIFY_ADMIN_API_TOKEN;
+  const apiUrl = `https://${shop}/admin/api/2024-10`;
+
+  try {
+    const { items, customer, shippingAddress, discountCode } = req.body;
+
+    // Validate required fields
+    if (!items || !items.length) {
+      return res.status(400).json({ error: "Cart is empty" });
+    }
+    if (!customer?.email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+    if (!shippingAddress?.first_name || !shippingAddress?.last_name) {
+      return res.status(400).json({ error: "First and last name are required" });
+    }
+    if (!shippingAddress?.address1 || !shippingAddress?.city || !shippingAddress?.country) {
+      return res.status(400).json({ error: "Address, city, and country are required" });
+    }
+
+    // Build line items from cart (variant_id + quantity)
+    const lineItems = items.map((item) => ({
+      variant_id: item.variant_id,
+      quantity: item.quantity,
+    }));
+
+    // Create draft order
+    const draftOrderBody = {
+      draft_order: {
+        line_items: lineItems,
+        email: customer.email,
+        shipping_address: {
+          first_name: shippingAddress.first_name,
+          last_name: shippingAddress.last_name,
+          address1: shippingAddress.address1,
+          address2: shippingAddress.address2 || "",
+          city: shippingAddress.city,
+          province: shippingAddress.province || "",
+          country: shippingAddress.country,
+          zip: shippingAddress.zip || "",
+          phone: shippingAddress.phone || "",
+        },
+        billing_address: {
+          first_name: shippingAddress.first_name,
+          last_name: shippingAddress.last_name,
+          address1: shippingAddress.address1,
+          address2: shippingAddress.address2 || "",
+          city: shippingAddress.city,
+          province: shippingAddress.province || "",
+          country: shippingAddress.country,
+          zip: shippingAddress.zip || "",
+          phone: shippingAddress.phone || "",
+        },
+        // Free shipping / flat rate — set shipping line
+        shipping_line: {
+          title: "Standard Shipping",
+          price: "0.00",
+          custom: true,
+        },
+        note: "Awaiting Aviagram payment",
+        tags: "aviagram-pending",
+      },
+    };
+
+    console.log("Creating draft order...");
+
+    const draftRes = await fetch(`${apiUrl}/draft_orders.json`, {
+      method: "POST",
+      headers: {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(draftOrderBody),
+    });
+
+    // Handle 202 (async calculation) — poll until ready
+    let draftData;
+    if (draftRes.status === 202) {
+      const location = draftRes.headers.get("location");
+      const retryAfter = parseInt(draftRes.headers.get("retry-after") || "2", 10);
+      console.log(`Draft order calculating, polling in ${retryAfter}s...`);
+      
+      let ready = false;
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, retryAfter * 1000));
+        const pollRes = await fetch(location || `${apiUrl}/draft_orders.json`, {
+          headers: { "X-Shopify-Access-Token": token },
+        });
+        if (pollRes.status === 200) {
+          draftData = await pollRes.json();
+          ready = true;
+          break;
+        }
+      }
+      if (!ready) {
+        return res.status(504).json({ error: "Draft order creation timed out" });
+      }
+    } else if (!draftRes.ok) {
+      const errText = await draftRes.text();
+      console.error("Draft order error:", draftRes.status, errText);
+      return res.status(502).json({ error: "Failed to create draft order", details: errText });
+    } else {
+      draftData = await draftRes.json();
+    }
+
+    const draftOrder = draftData.draft_order;
+    const draftOrderId = draftOrder.id;
+    const totalPrice = draftOrder.total_price;
+
+    console.log(`Draft order created: ${draftOrderId}, total: ${totalPrice} ${draftOrder.currency}`);
+
+    // Now create Aviagram payment
+    const credentials = Buffer.from(
+      `${process.env.AVIAGRAM_CLIENT_ID}:${process.env.AVIAGRAM_CLIENT_SECRET}`
+    ).toString("base64");
+
+    const aviagramBody = {
+      amount: String(totalPrice),
+      currency: "EUR-SP",
+      webhook_url: `${process.env.BASE_URL}/api/webhook?secret=${process.env.WEBHOOK_SECRET}`,
+    };
+
+    const aviagramRes = await fetch("https://aviagram.app/api/payment/createForm", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Basic ${credentials}`,
+      },
+      body: JSON.stringify(aviagramBody),
+    });
+
+    if (!aviagramRes.ok) {
+      const errorText = await aviagramRes.text();
+      console.error("Aviagram API error:", aviagramRes.status, errorText);
+      // Delete the draft order since payment couldn't be created
+      await fetch(`${apiUrl}/draft_orders/${draftOrderId}.json`, {
+        method: "DELETE",
+        headers: { "X-Shopify-Access-Token": token },
+      });
+      return res.status(502).json({ error: "Payment gateway error", details: errorText });
+    }
+
+    const aviagramData = await aviagramRes.json();
+    console.log(`Aviagram payment created: ${aviagramData.orderId} for draft order ${draftOrderId}`);
+
+    // Tag draft order with Aviagram order ID for webhook matching
+    await fetch(`${apiUrl}/draft_orders/${draftOrderId}.json`, {
+      method: "PUT",
+      headers: {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        draft_order: {
+          id: draftOrderId,
+          note: `Aviagram: ${aviagramData.orderId}`,
+          tags: `aviagram-pending,aviagram:${aviagramData.orderId}`,
+        },
+      }),
+    });
+
+    return res.status(200).json({
+      success: true,
+      draftOrderId,
+      aviagramOrderId: aviagramData.orderId,
+      redirectUrl: aviagramData.redirect_url,
+      totalPrice,
+      currency: draftOrder.currency,
+    });
+  } catch (error) {
+    console.error("Checkout error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
