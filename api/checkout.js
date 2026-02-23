@@ -193,7 +193,25 @@ export default async function handler(req, res) {
     } else if (!draftRes.ok) {
       const errText = await draftRes.text();
       console.error("Draft order error:", draftRes.status, errText);
-      return res.status(502).json({ error: "Failed to create draft order", details: errText });
+      
+      // Parse Shopify error and return a user-friendly message
+      let userMessage = "Failed to create order. Please try again.";
+      try {
+        const errJson = JSON.parse(errText);
+        if (errJson.errors) {
+          if (typeof errJson.errors === "string") {
+            userMessage = errJson.errors;
+          } else {
+            // Format field-specific errors like {email: ["contains an invalid domain name"]}
+            const messages = Object.entries(errJson.errors).map(
+              ([field, msgs]) => `${field}: ${Array.isArray(msgs) ? msgs.join(", ") : msgs}`
+            );
+            userMessage = messages.join(". ");
+          }
+        }
+      } catch (e) {}
+      
+      return res.status(422).json({ error: userMessage });
     } else {
       draftData = await draftRes.json();
     }
