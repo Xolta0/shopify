@@ -131,27 +131,64 @@ export default async function handler(req, res) {
       body: JSON.stringify(draftOrderBody),
     });
 
-    // Handle 202 (async calculation) — poll until ready
+    // Handle 202 (async calculation) — poll the specific draft order URL
     let draftData;
     if (draftRes.status === 202) {
-      const location = draftRes.headers.get("location");
-      const retryAfter = parseInt(draftRes.headers.get("retry-after") || "2", 10);
-      console.log(`Draft order calculating, polling in ${retryAfter}s...`);
+      // Shopify may return the draft order in the body even with 202
+      const initialData = await draftRes.json().catch(() => null);
       
-      let ready = false;
-      for (let i = 0; i < 10; i++) {
-        await new Promise((r) => setTimeout(r, retryAfter * 1000));
-        const pollRes = await fetch(location || `${apiUrl}/draft_orders.json`, {
-          headers: { "X-Shopify-Access-Token": token },
-        });
-        if (pollRes.status === 200) {
-          draftData = await pollRes.json();
-          ready = true;
-          break;
+      if (initialData?.draft_order?.id) {
+        // Got the draft order ID, poll its specific endpoint
+        const draftId = initialData.draft_order.id;
+        console.log(`Draft order ${draftId} calculating, polling...`);
+        
+        let ready = false;
+        for (let i = 0; i < 10; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          const pollRes = await fetch(`${apiUrl}/draft_orders/${draftId}.json`, {
+            headers: { 
+              "X-Shopify-Access-Token": token,
+              "Content-Type": "application/json",
+            },
+          });
+          if (pollRes.status === 200) {
+            const pollData = await pollRes.json();
+            if (pollData.draft_order?.status !== "calculating") {
+              draftData = pollData;
+              ready = true;
+              break;
+            }
+          }
+          console.log(`Poll attempt ${i + 1}: still calculating...`);
         }
-      }
-      if (!ready) {
-        return res.status(504).json({ error: "Draft order creation timed out" });
+        if (!ready) {
+          return res.status(504).json({ error: "Draft order creation timed out" });
+        }
+      } else {
+        // No ID in response, check location header
+        const location = draftRes.headers.get("location");
+        if (location) {
+          let ready = false;
+          for (let i = 0; i < 10; i++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            const pollRes = await fetch(location, {
+              headers: { 
+                "X-Shopify-Access-Token": token,
+                "Content-Type": "application/json",
+              },
+            });
+            if (pollRes.status === 200) {
+              draftData = await pollRes.json();
+              ready = true;
+              break;
+            }
+          }
+          if (!ready) {
+            return res.status(504).json({ error: "Draft order creation timed out" });
+          }
+        } else {
+          return res.status(502).json({ error: "Draft order returned 202 with no ID or location" });
+        }
       }
     } else if (!draftRes.ok) {
       const errText = await draftRes.text();
