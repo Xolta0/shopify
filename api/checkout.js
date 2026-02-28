@@ -229,9 +229,7 @@ export default async function handler(req, res) {
 
     const aviagramBody = {
       amount: String(totalPrice),
-      currency: "EUR-LP",
-      originalCurrency: "GBP",
-      convertCurrency: "True",
+      currency: "EUR-SP",
       webhook_url: `${process.env.BASE_URL}/api/webhook?secret=${process.env.WEBHOOK_SECRET}&draft=${draftOrderId}`,
     };
 
