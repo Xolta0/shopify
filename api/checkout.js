@@ -284,7 +284,7 @@ export default async function handler(req, res) {
       currency: "USD",
       initiate_type: "inline",
       transaction_ref: transactionRef,
-      callback_url: `https://${process.env.STORE_DOMAIN || "blushandbeauty.co.uk"}/pages/payment-success`,
+      callback_url: "https://blushandbeauty.co.uk/pages/success",
       payment_channels: ["card"],
       metadata: {
         draft_order_id: String(draftOrderId),
