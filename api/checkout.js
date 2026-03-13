@@ -11,7 +11,6 @@ let cachedToken = null;
 let tokenExpiresAt = 0;
 
 async function getShopifyToken() {
-  // Return cached token if still valid (with 60s buffer)
   if (cachedToken && Date.now() < tokenExpiresAt - 60000) return cachedToken;
 
   const shop = process.env.SHOPIFY_STORE_DOMAIN;
@@ -109,14 +108,13 @@ export default async function handler(req, res) {
           zip: shippingAddress.zip || "",
           phone: shippingAddress.phone || "",
         },
-        // Free shipping / flat rate — set shipping line
         shipping_line: {
           title: "Standard Shipping",
           price: "0.00",
           custom: true,
         },
-        note: "Awaiting Aviagram payment",
-        tags: "aviagram-pending",
+        note: "Awaiting Squad payment",
+        tags: "squad-pending",
       },
     };
 
@@ -131,22 +129,20 @@ export default async function handler(req, res) {
       body: JSON.stringify(draftOrderBody),
     });
 
-    // Handle 202 (async calculation) — poll the specific draft order URL
+    // Handle 202 (async calculation)
     let draftData;
     if (draftRes.status === 202) {
-      // Shopify may return the draft order in the body even with 202
       const initialData = await draftRes.json().catch(() => null);
-      
+
       if (initialData?.draft_order?.id) {
-        // Got the draft order ID, poll its specific endpoint
         const draftId = initialData.draft_order.id;
         console.log(`Draft order ${draftId} calculating, polling...`);
-        
+
         let ready = false;
         for (let i = 0; i < 10; i++) {
           await new Promise((r) => setTimeout(r, 2000));
           const pollRes = await fetch(`${apiUrl}/draft_orders/${draftId}.json`, {
-            headers: { 
+            headers: {
               "X-Shopify-Access-Token": token,
               "Content-Type": "application/json",
             },
@@ -165,14 +161,13 @@ export default async function handler(req, res) {
           return res.status(504).json({ error: "Draft order creation timed out" });
         }
       } else {
-        // No ID in response, check location header
         const location = draftRes.headers.get("location");
         if (location) {
           let ready = false;
           for (let i = 0; i < 10; i++) {
             await new Promise((r) => setTimeout(r, 2000));
             const pollRes = await fetch(location, {
-              headers: { 
+              headers: {
                 "X-Shopify-Access-Token": token,
                 "Content-Type": "application/json",
               },
@@ -193,8 +188,7 @@ export default async function handler(req, res) {
     } else if (!draftRes.ok) {
       const errText = await draftRes.text();
       console.error("Draft order error:", draftRes.status, errText);
-      
-      // Parse Shopify error and return a user-friendly message
+
       let userMessage = "Failed to create order. Please try again.";
       try {
         const errJson = JSON.parse(errText);
@@ -202,7 +196,6 @@ export default async function handler(req, res) {
           if (typeof errJson.errors === "string") {
             userMessage = errJson.errors;
           } else {
-            // Format field-specific errors like {email: ["contains an invalid domain name"]}
             const messages = Object.entries(errJson.errors).map(
               ([field, msgs]) => `${field}: ${Array.isArray(msgs) ? msgs.join(", ") : msgs}`
             );
@@ -210,7 +203,7 @@ export default async function handler(req, res) {
           }
         }
       } catch (e) {}
-      
+
       return res.status(422).json({ error: userMessage });
     } else {
       draftData = await draftRes.json();
@@ -222,29 +215,42 @@ export default async function handler(req, res) {
 
     console.log(`Draft order created: ${draftOrderId}, total: ${totalPrice} ${draftOrder.currency}`);
 
-    // Now create Aviagram payment
-    const credentials = Buffer.from(
-      `${process.env.AVIAGRAM_CLIENT_ID}:${process.env.AVIAGRAM_CLIENT_SECRET}`
-    ).toString("base64");
+    // Convert price to cents for Squad (e.g. "5.25" -> 525)
+    const amountInCents = Math.round(parseFloat(totalPrice) * 100);
 
-    const aviagramBody = {
-      amount: String(totalPrice),
-      currency: "EUR-LP",
-      webhook_url: `${process.env.BASE_URL}/api/webhook?secret=${process.env.WEBHOOK_SECRET}&draft=${draftOrderId}`,
+    // Generate unique transaction reference
+    const transactionRef = `BB-${draftOrderId}-${Date.now()}`;
+
+    // Create Squad payment
+    const squadBody = {
+      amount: amountInCents,
+      email: customer.email,
+      currency: "USD",
+      initiate_type: "inline",
+      transaction_ref: transactionRef,
+      callback_url: `https://${process.env.STORE_DOMAIN || "blushandbeauty.co.uk"}/pages/payment-success`,
+      payment_channels: ["card"],
+      metadata: {
+        draft_order_id: String(draftOrderId),
+      },
+      pass_charge: false,
+      customer_name: `${shippingAddress.first_name} ${shippingAddress.last_name}`,
     };
 
-    const aviagramRes = await fetch("https://aviagram.app/api/payment/createForm", {
+    console.log(`Creating Squad payment: ref=${transactionRef} amount=${amountInCents} cents`);
+
+    const squadRes = await fetch("https://api-d.squadco.com/transaction/initiate", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Basic ${credentials}`,
+        Authorization: `Bearer ${process.env.SQUAD_SECRET_KEY}`,
       },
-      body: JSON.stringify(aviagramBody),
+      body: JSON.stringify(squadBody),
     });
 
-    if (!aviagramRes.ok) {
-      const errorText = await aviagramRes.text();
-      console.error("Aviagram API error:", aviagramRes.status, errorText);
+    if (!squadRes.ok) {
+      const errorText = await squadRes.text();
+      console.error("Squad API error:", squadRes.status, errorText);
       // Delete the draft order since payment couldn't be created
       await fetch(`${apiUrl}/draft_orders/${draftOrderId}.json`, {
         method: "DELETE",
@@ -253,10 +259,21 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: "Payment gateway error", details: errorText });
     }
 
-    const aviagramData = await aviagramRes.json();
-    console.log(`Aviagram payment created: ${aviagramData.orderId} for draft order ${draftOrderId}`);
+    const squadData = await squadRes.json();
+    const checkoutUrl = squadData.data?.checkout_url;
 
-    // Tag draft order with Aviagram order ID for webhook matching
+    if (!checkoutUrl) {
+      console.error("Squad response missing checkout_url:", JSON.stringify(squadData));
+      await fetch(`${apiUrl}/draft_orders/${draftOrderId}.json`, {
+        method: "DELETE",
+        headers: { "X-Shopify-Access-Token": token },
+      });
+      return res.status(502).json({ error: "Payment gateway did not return checkout URL" });
+    }
+
+    console.log(`Squad payment created: ref=${transactionRef}, checkout=${checkoutUrl}`);
+
+    // Tag draft order with Squad transaction ref
     await fetch(`${apiUrl}/draft_orders/${draftOrderId}.json`, {
       method: "PUT",
       headers: {
@@ -266,8 +283,8 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         draft_order: {
           id: draftOrderId,
-          note: `Aviagram: ${aviagramData.orderId}`,
-          tags: `aviagram-pending,aviagram:${aviagramData.orderId}`,
+          note: `Squad: ${transactionRef}`,
+          tags: `squad-pending,squad:${transactionRef}`,
         },
       }),
     });
@@ -275,8 +292,8 @@ export default async function handler(req, res) {
     return res.status(200).json({
       success: true,
       draftOrderId,
-      aviagramOrderId: aviagramData.orderId,
-      redirectUrl: aviagramData.redirect_url,
+      transactionRef,
+      redirectUrl: checkoutUrl,
       totalPrice,
       currency: draftOrder.currency,
     });
