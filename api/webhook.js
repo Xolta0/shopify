@@ -1,4 +1,5 @@
 import { URLSearchParams } from "node:url";
+import crypto from "node:crypto";
 
 // Token cache
 let cachedToken = null;
@@ -41,27 +42,33 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // Verify webhook secret
-  const { secret, draft } = req.query;
+  // Verify webhook secret (passed as query param in the URL set on Squad dashboard)
+  const { secret } = req.query;
   if (secret !== process.env.WEBHOOK_SECRET) {
     console.error("Webhook: invalid secret");
     return res.status(401).json({ error: "Unauthorized" });
   }
 
   try {
-    const { orderId, amount, status, method, currency, type, createdAt } = req.body;
-    console.log(`Webhook: orderId=${orderId} status=${status} amount=${amount} currency=${currency} draftId=${draft}`);
+    const payload = req.body;
+    const event = payload.Event;
+    const transactionRef = payload.TransactionRef;
+    const body = payload.Body || {};
 
-    if (status === "RECEIVED") {
-      if (!draft) {
-        throw new Error("No draft order ID in webhook URL");
+    console.log(`Webhook: event=${event} ref=${transactionRef} status=${body.transaction_status} amount=${body.amount} currency=${body.currency}`);
+
+    if (event === "charge_successful" && body.transaction_status === "Success") {
+      // Get draft order ID from metadata
+      const draftOrderId = body.meta?.draft_order_id;
+
+      if (!draftOrderId) {
+        throw new Error(`No draft_order_id in metadata for transaction: ${transactionRef}`);
       }
-      await completeDraftOrder(draft, orderId, amount);
-      console.log(`Draft order ${draft} completed for Aviagram ${orderId}`);
-    } else if (status === "CANCELED") {
-      console.log(`Payment ${orderId} was canceled`);
-    } else if (status === "TIMEOUT") {
-      console.log(`Payment ${orderId} timed out`);
+
+      await completeDraftOrder(draftOrderId, transactionRef, body.amount);
+      console.log(`Draft order ${draftOrderId} completed for Squad ${transactionRef}`);
+    } else {
+      console.log(`Ignoring webhook: event=${event} status=${body.transaction_status}`);
     }
 
     return res.status(200).json({ received: true });
@@ -71,14 +78,14 @@ export default async function handler(req, res) {
   }
 }
 
-async function completeDraftOrder(draftOrderId, aviagramOrderId, amount) {
+async function completeDraftOrder(draftOrderId, transactionRef, amount) {
   const shop = process.env.SHOPIFY_STORE_DOMAIN;
   const token = await getShopifyToken();
   const apiUrl = `https://${shop}/admin/api/2025-01`;
 
   console.log(`Completing draft order ${draftOrderId}...`);
 
-  // Complete the draft order directly (payment_pending=false means it's fully paid)
+  // Complete the draft order (payment_pending=false means fully paid)
   const completeRes = await fetch(
     `${apiUrl}/draft_orders/${draftOrderId}/complete.json?payment_pending=false`,
     {
@@ -100,7 +107,7 @@ async function completeDraftOrder(draftOrderId, aviagramOrderId, amount) {
 
   console.log(`Draft order ${draftOrderId} completed → Shopify order ${orderId}`);
 
-  // Tag the newly created order with Aviagram info
+  // Tag the real order with Squad info
   if (orderId) {
     await fetch(`${apiUrl}/orders/${orderId}.json`, {
       method: "PUT",
@@ -111,8 +118,8 @@ async function completeDraftOrder(draftOrderId, aviagramOrderId, amount) {
       body: JSON.stringify({
         order: {
           id: orderId,
-          tags: `aviagram-paid,aviagram:${aviagramOrderId}`,
-          note: `Paid via Aviagram. Payment ID: ${aviagramOrderId}`,
+          tags: `squad-paid,squad:${transactionRef}`,
+          note: `Paid via Squad. Transaction: ${transactionRef}`,
         },
       }),
     });
