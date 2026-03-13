@@ -81,6 +81,61 @@ export default async function handler(req, res) {
       quantity: item.quantity,
     }));
 
+    // Look up discount code if provided
+    let appliedDiscount = null;
+    if (discountCode) {
+      console.log(`Looking up discount code: ${discountCode}`);
+      try {
+        const discountLookup = await fetch(
+          `${apiUrl}/discount_codes/lookup.json?code=${encodeURIComponent(discountCode)}`,
+          {
+            headers: {
+              "X-Shopify-Access-Token": token,
+              "Content-Type": "application/json",
+            },
+            redirect: "follow",
+          }
+        );
+
+        if (discountLookup.ok) {
+          const discountData = await discountLookup.json();
+          const priceRuleId = discountData.discount_code?.price_rule_id;
+
+          if (priceRuleId) {
+            const ruleRes = await fetch(`${apiUrl}/price_rules/${priceRuleId}.json`, {
+              headers: {
+                "X-Shopify-Access-Token": token,
+                "Content-Type": "application/json",
+              },
+            });
+
+            if (ruleRes.ok) {
+              const ruleData = await ruleRes.json();
+              const rule = ruleData.price_rule;
+
+              // value is negative (e.g. "-10.0" for 10% off or $10 off)
+              const discountValue = String(Math.abs(parseFloat(rule.value)));
+
+              appliedDiscount = {
+                description: discountCode.toUpperCase(),
+                value_type: rule.value_type, // "percentage" or "fixed_amount"
+                value: discountValue,
+                title: discountCode.toUpperCase(),
+              };
+
+              console.log(`Discount found: ${rule.value_type} ${discountValue} (code: ${discountCode})`);
+            }
+          }
+        } else {
+          console.log(`Discount code not found or invalid: ${discountCode}`);
+          return res.status(422).json({ error: `Invalid discount code: ${discountCode}` });
+        }
+      } catch (discountErr) {
+        console.error("Discount lookup error:", discountErr);
+        // Continue without discount rather than failing the whole checkout
+      }
+    }
+
     // Create draft order
     const draftOrderBody = {
       draft_order: {
@@ -108,6 +163,7 @@ export default async function handler(req, res) {
           zip: shippingAddress.zip || "",
           phone: shippingAddress.phone || "",
         },
+        ...(appliedDiscount && { applied_discount: appliedDiscount }),
         shipping_line: {
           title: "Standard Shipping",
           price: "0.00",
