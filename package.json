@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Aviagram payment gateway integration for Shopify",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vercel dev"
   },
