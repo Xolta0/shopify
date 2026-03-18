@@ -113,12 +113,11 @@ export default async function handler(req, res) {
               const ruleData = await ruleRes.json();
               const rule = ruleData.price_rule;
 
-              // value is negative (e.g. "-10.0" for 10% off or $10 off)
               const discountValue = String(Math.abs(parseFloat(rule.value)));
 
               appliedDiscount = {
                 description: discountCode.toUpperCase(),
-                value_type: rule.value_type, // "percentage" or "fixed_amount"
+                value_type: rule.value_type,
                 value: discountValue,
                 title: discountCode.toUpperCase(),
               };
@@ -132,7 +131,6 @@ export default async function handler(req, res) {
         }
       } catch (discountErr) {
         console.error("Discount lookup error:", discountErr);
-        // Continue without discount rather than failing the whole checkout
       }
     }
 
@@ -169,8 +167,8 @@ export default async function handler(req, res) {
           price: "0.00",
           custom: true,
         },
-        note: "Awaiting Squad payment",
-        tags: "squad-pending",
+        note: "Awaiting payment",
+        tags: "payment-pending",
       },
     };
 
@@ -268,68 +266,25 @@ export default async function handler(req, res) {
     const draftOrder = draftData.draft_order;
     const draftOrderId = draftOrder.id;
     const totalPrice = draftOrder.total_price;
+    const subtotalPrice = draftOrder.subtotal_price;
+    const currency = draftOrder.currency;
 
-    console.log(`Draft order created: ${draftOrderId}, total: ${totalPrice} ${draftOrder.currency}`);
+    console.log(`Draft order created: ${draftOrderId}, total: ${totalPrice} ${currency}`);
 
-    // Convert price to cents for Squad (e.g. "5.25" -> 525)
-    const amountInCents = Math.round(parseFloat(totalPrice) * 100);
+    // Build redirect URL with order details
+    const params = new URLSearchParams();
+    params.set("draft_id", String(draftOrderId));
+    params.set("email", customer.email);
+    params.set("name", `${shippingAddress.first_name} ${shippingAddress.last_name}`);
+    params.set("currency", currency);
+    params.set("subtotal", subtotalPrice);
+    params.set("total", totalPrice);
 
-    // Generate unique transaction reference
-    const transactionRef = `BB-${draftOrderId}-${Date.now()}`;
+    const redirectUrl = `https://pay.beautylumiere.com/payment/cda/checkout.php?${params.toString()}`;
 
-    // Create Squad payment
-    const squadBody = {
-      amount: amountInCents,
-      email: customer.email,
-      currency: "USD",
-      initiate_type: "inline",
-      transaction_ref: transactionRef,
-      callback_url: "https://blushandbeauty.co.uk/pages/success",
-      payment_channels: ["card"],
-      metadata: {
-        draft_order_id: String(draftOrderId),
-      },
-      pass_charge: false,
-      customer_name: `${shippingAddress.first_name} ${shippingAddress.last_name}`,
-    };
+    console.log(`Payment redirect for draft ${draftOrderId}, total: ${totalPrice} ${currency}`);
 
-    console.log(`Creating Squad payment: ref=${transactionRef} amount=${amountInCents} cents`);
-
-    const squadRes = await fetch("https://api-d.squadco.com/transaction/initiate", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.SQUAD_SECRET_KEY}`,
-      },
-      body: JSON.stringify(squadBody),
-    });
-
-    if (!squadRes.ok) {
-      const errorText = await squadRes.text();
-      console.error("Squad API error:", squadRes.status, errorText);
-      // Delete the draft order since payment couldn't be created
-      await fetch(`${apiUrl}/draft_orders/${draftOrderId}.json`, {
-        method: "DELETE",
-        headers: { "X-Shopify-Access-Token": token },
-      });
-      return res.status(502).json({ error: "Payment gateway error", details: errorText });
-    }
-
-    const squadData = await squadRes.json();
-    const checkoutUrl = squadData.data?.checkout_url;
-
-    if (!checkoutUrl) {
-      console.error("Squad response missing checkout_url:", JSON.stringify(squadData));
-      await fetch(`${apiUrl}/draft_orders/${draftOrderId}.json`, {
-        method: "DELETE",
-        headers: { "X-Shopify-Access-Token": token },
-      });
-      return res.status(502).json({ error: "Payment gateway did not return checkout URL" });
-    }
-
-    console.log(`Squad payment created: ref=${transactionRef}, checkout=${checkoutUrl}`);
-
-    // Tag draft order with Squad transaction ref
+    // Tag draft order
     await fetch(`${apiUrl}/draft_orders/${draftOrderId}.json`, {
       method: "PUT",
       headers: {
@@ -339,8 +294,8 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         draft_order: {
           id: draftOrderId,
-          note: `Squad: ${transactionRef}`,
-          tags: `squad-pending,squad:${transactionRef}`,
+          note: `Awaiting payment - Draft ${draftOrderId}`,
+          tags: "payment-pending",
         },
       }),
     });
@@ -348,10 +303,9 @@ export default async function handler(req, res) {
     return res.status(200).json({
       success: true,
       draftOrderId,
-      transactionRef,
-      redirectUrl: checkoutUrl,
+      redirectUrl,
       totalPrice,
-      currency: draftOrder.currency,
+      currency,
     });
   } catch (error) {
     console.error("Checkout error:", error);
