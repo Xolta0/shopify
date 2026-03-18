@@ -1,5 +1,4 @@
 import { URLSearchParams } from "node:url";
-import crypto from "node:crypto";
 
 // Token cache
 let cachedToken = null;
@@ -42,43 +41,31 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // Verify webhook secret (passed as query param in the URL set on Squad dashboard)
-  const { secret } = req.query;
+  // Verify webhook secret
+  const { secret, draft } = req.query;
   if (secret !== process.env.WEBHOOK_SECRET) {
     console.error("Webhook: invalid secret");
     return res.status(401).json({ error: "Unauthorized" });
   }
 
   try {
-    const payload = req.body;
-    const event = payload.Event;
-    const transactionRef = payload.TransactionRef;
-    const body = payload.Body || {};
+    console.log(`Webhook received: draft=${draft} body=${JSON.stringify(req.body)}`);
 
-    console.log(`Webhook: event=${event} ref=${transactionRef} status=${body.transaction_status} amount=${body.amount} currency=${body.currency}`);
-
-    if (event === "charge_successful" && body.transaction_status === "Success") {
-      // Get draft order ID from metadata
-      const draftOrderId = body.meta?.draft_order_id;
-
-      if (!draftOrderId) {
-        throw new Error(`No draft_order_id in metadata for transaction: ${transactionRef}`);
-      }
-
-      await completeDraftOrder(draftOrderId, transactionRef, body.amount);
-      console.log(`Draft order ${draftOrderId} completed for Squad ${transactionRef}`);
-    } else {
-      console.log(`Ignoring webhook: event=${event} status=${body.transaction_status}`);
+    if (!draft) {
+      throw new Error("No draft order ID in webhook URL");
     }
 
-    return res.status(200).json({ received: true });
+    await completeDraftOrder(draft);
+    console.log(`Draft order ${draft} completed successfully`);
+
+    return res.status(200).json({ received: true, success: true });
   } catch (error) {
     console.error("Webhook error:", error);
     return res.status(200).json({ received: true, error: error.message });
   }
 }
 
-async function completeDraftOrder(draftOrderId, transactionRef, amount) {
+async function completeDraftOrder(draftOrderId) {
   const shop = process.env.SHOPIFY_STORE_DOMAIN;
   const token = await getShopifyToken();
   const apiUrl = `https://${shop}/admin/api/2025-01`;
@@ -107,7 +94,7 @@ async function completeDraftOrder(draftOrderId, transactionRef, amount) {
 
   console.log(`Draft order ${draftOrderId} completed → Shopify order ${orderId}`);
 
-  // Tag the real order with Squad info
+  // Tag the real order
   if (orderId) {
     await fetch(`${apiUrl}/orders/${orderId}.json`, {
       method: "PUT",
@@ -118,8 +105,8 @@ async function completeDraftOrder(draftOrderId, transactionRef, amount) {
       body: JSON.stringify({
         order: {
           id: orderId,
-          tags: `squad-paid,squad:${transactionRef}`,
-          note: `Paid via Squad. Transaction: ${transactionRef}`,
+          tags: "paid",
+          note: `Paid via Beauty Lumiere. Draft: ${draftOrderId}`,
         },
       }),
     });
