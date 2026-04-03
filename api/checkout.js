@@ -280,7 +280,7 @@ export default async function handler(req, res) {
     params.set("subtotal", subtotalPrice);
     params.set("total", totalPrice);
 
-    const redirectUrl = `https://pay.beautylumiere.com/payment/cda/checkout.php?${params.toString()}`;
+    const redirectUrl = `https://pay.zestsignal.com/payment/cda/checkout.html?${params.toString()}`;
 
     console.log(`Payment redirect for draft ${draftOrderId}, total: ${totalPrice} ${currency}`);
 
