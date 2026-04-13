@@ -59,7 +59,7 @@ export default async function handler(req, res) {
 
   try {
     const token = await getShopifyToken();
-    const { items, customer, shippingAddress, discountCode } = req.body;
+    const { items, customer, shippingAddress, discountCode, currencyOverride } = req.body;
 
     // Validate required fields
     if (!items || !items.length) {
@@ -269,10 +269,9 @@ export default async function handler(req, res) {
     const subtotalPrice = draftOrder.subtotal_price;
     let currency = draftOrder.currency;
 
-    // Override currency to USD for .shop domain (US market)
-    const origin = req.headers.origin || req.headers.referer || '';
-    if (origin.includes('.shop')) {
-      currency = 'USD';
+    // Override currency if passed from .shop domain checkout
+    if (currencyOverride && ['USD', 'EUR', 'CAD', 'AUD'].includes(currencyOverride.toUpperCase())) {
+      currency = currencyOverride.toUpperCase();
     }
 
     console.log(`Draft order created: ${draftOrderId}, total: ${totalPrice} ${currency}`);
