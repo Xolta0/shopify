@@ -267,7 +267,13 @@ export default async function handler(req, res) {
     const draftOrderId = draftOrder.id;
     const totalPrice = draftOrder.total_price;
     const subtotalPrice = draftOrder.subtotal_price;
-    const currency = draftOrder.currency;
+    let currency = draftOrder.currency;
+
+    // Override currency to USD for .shop domain (US market)
+    const origin = req.headers.origin || req.headers.referer || '';
+    if (origin.includes('.shop')) {
+      currency = 'USD';
+    }
 
     console.log(`Draft order created: ${draftOrderId}, total: ${totalPrice} ${currency}`);
 
